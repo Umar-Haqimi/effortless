@@ -2766,7 +2766,7 @@ function handoffCardTree($: EngineInterface, e: RenderInput<'AssistantMessage'> 
 /** Where the mod learns of a new version: the newest entry of public.json on main, written only by tools/publish.sh.
  * Releases between publishes (releases.json) reach the dev channel, never this card. */
 // The API, not raw.githubusercontent.com: the raw file sits behind a cache that lagged two releases behind.
-const RELEASES_URL = 'https://api.github.com/repos/HeyCubit/effortless/contents/public.json?ref=main'
+const RELEASES_URL = 'https://api.github.com/repos/Umar-Haqimi/effortless/contents/public.json?ref=main'
 const WHATS_NEW_URL = 'https://heycubit.github.io/effortless/whats-new/'
 /** The site, the link Share copies for a friend. */
 const SITE_URL = 'https://heycubit.github.io/effortless/'
@@ -2821,9 +2821,9 @@ async function latestFromGit($: EngineInterface): Promise<{ version: string; not
   const git = (...args: string[]) => $.process.run(['git', '-C', dir, ...args], { timeoutMs: 60_000 })
   if ((await git('rev-parse', '--git-dir').catch(() => null))?.exitCode !== 0) {
     await $.process.run(['git', 'init', '-q', dir], { timeoutMs: 30_000 })
-    await git('remote', 'add', 'origin', 'https://github.com/HeyCubit/effortless.git')
+    await git('remote', 'add', 'origin', 'https://github.com/Umar-Haqimi/effortless.git')
   }
-  const fetched = await git('fetch', '-q', '--depth', '1', '--filter=blob:none', 'origin', 'stable')
+  const fetched = await git('fetch', '-q', '--depth', '1', '--filter=blob:none', 'origin', 'main')
   if (fetched.exitCode !== 0) return undefined
   const shown = await git('show', 'FETCH_HEAD:public.json')
   return shown.exitCode === 0 ? latestRelease(shown.stdout) : undefined

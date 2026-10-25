@@ -12,8 +12,8 @@
       "description": "Sets the reasoning effort for every prompt automatically and shows a prompt-cache countdown with one-click Compact.",
       "source": {
         "source": "url",
-        "url": "https://github.com/HeyCubit/effortless.git",
-        "ref": "stable"
+        "url": "https://github.com/Umar-Haqimi/effortless.git",
+        "ref": "main"
       },
       "category": "productivity"
     },
@@ -22,9 +22,9 @@
       "description": "While Claude works, the chat shows one tall pixel-art card instead of every step.",
       "source": {
         "source": "git-subdir",
-        "url": "https://github.com/HeyCubit/effortless.git",
+        "url": "https://github.com/Umar-Haqimi/effortless.git",
         "path": "textless/plugin",
-        "ref": "stable"
+        "ref": "main"
       },
       "category": "productivity"
     }
