@@ -1,0 +1,34 @@
+{
+  "model": "inception/mercury-decide",
+  "provider": { "data_collection": "deny" },
+  "state": {
+    "task": "Choose the reasoning effort (and model) an agentic assistant should use for the next user message. It reads files, runs tools and edits things, not only code. Pick the cheapest that still does the job well.",
+    "current_model": "opus",
+    "current_effort": "medium",
+    "recent_conversation": "",
+    "next_message": "rename one variable in a single file"
+  },
+  "questions": {
+    "effort": {
+      "type": "choice",
+      "instructions": "Which effort fits the next message?",
+      "criteria": {
+        "low": "quick answer, no tools, no planning",
+        "medium": "normal work: a few tool calls or edits",
+        "high": "hard or large multi-step job: many tool calls, costly mistakes",
+        "xhigh": "very hard: a long investigation",
+        "max": "the hardest research-level work"
+      }
+    },
+    "model": {
+      "type": "choice",
+      "instructions": "Which model fits the next message?",
+      "criteria": {
+        "haiku": "trivial questions, lookups, renames, chit-chat",
+        "sonnet": "normal coding, edits across a few files, explanations, writing",
+        "opus": "hard debugging, architecture, large refactors, careful reviews",
+        "fable": "the hardest long-horizon or research-level work"
+      }
+    }
+  }
+}

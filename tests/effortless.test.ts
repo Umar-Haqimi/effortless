@@ -1,7 +1,7 @@
 import { describe, expect, mock, test as baseTest } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, userText, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
+import { helperFloor, namedEffort, hotVisible, looksLikeRedo, REDO_STAY_PROMPTS, routeWorth, syncPlan, tipped, bounded, handoffEvidence, parseHandoffAnswer, withJevKey, withEnvKey, parseEnvKey, OPENROUTER_MODEL, parseVerdict, capped, resetLabel, HANDOFF_PROMPT, handoffMessage, withAttachments, endsOnQuestion, keepsEffort, benchGrade, benchReport, judgeFailure, contextFrom, userText, readConfig, asSpent, cacheColor, cacheLabel, cacheClock, cacheSafe, cacheTtlOf, mostlyCached, isFollowUp, parseJevAnswer, parseJevKey, savedText, forkOutcome, setupNext, setupBack, setupCounter, dashboardLines, flashColor, handoffGlowStep, weighted, handoffLook, isNewer, latestRelease, updateSnoozed, updateFailure, claudeCandidates, noClaudeHint, compactTranscript, judgeGlowSvg, judgeGlowAt, judgeBrightnessAt, JUDGE_RISE_MS, JUDGE_FADE_MS, JUDGE_STEP_MS, JUDGE_PIECE_MS } from '../hooks/register'
 import { ART_COLUMNS, artFrame, artPixel, MOVING } from '../hooks/art'
 import { isLight, lightHex, lightProps, setLight, setTheme, themedEls, themedSvg, tint, tintHex } from '../hooks/theme'
 import { importsOf, moduleLinks, moduleOf, relPath, withTouch } from '../hooks/agents'
@@ -739,7 +739,7 @@ describe('named level', () => {
 describe('state from an older version', () => {
   test('the pre-0.2.0 tally { requests, actual, baseline } reads as an empty tally, never throws', () => {
     const old = { requests: 3, actual: 900, baseline: 1500 } as never
-    expect(asSpent(old).judge).toEqual({ jev: 0, haiku: 0, ms: 0, tokens: 0 })
+    expect(asSpent(old).judge).toEqual({ jev: 0, openrouter: 0, haiku: 0, ms: 0, tokens: 0 })
     expect(asSpent(old).byEffort).toEqual({})
     expect(() => savedText(old)).not.toThrow()
     expect(asSpent(undefined).prompts).toBe(0)
@@ -1141,6 +1141,8 @@ describe('judge choice (plugin settings)', () => {
     expect(readConfig({})).toEqual({
       judge: 'auto',
       typesafeKey: '',
+      openrouterKey: '',
+      openrouterModel: 'inception/mercury-decide',
       handoffSkill: '',
       handoffAfter: 'continue',
       bias: 0,
@@ -4001,5 +4003,191 @@ describe('theme', () => {
     } finally {
       setTheme('violet')
     }
+  })
+})
+
+describe('OpenRouter Decisions judge', () => {
+  const OR = { judge: 'openrouter', openrouterKey: 'or-k' }
+  const fetches = (on: On, reply: () => { status: number; text: string }) => {
+    const calls: { url: string; headers: Record<string, string>; body: Record<string, any> }[] = []
+    on('http.fetch', (_$, e) => {
+      calls.push({ url: e.url, headers: (e.init?.headers ?? {}) as Record<string, string>, body: JSON.parse(String(e.init?.body)) })
+      const r = reply()
+      return { value: { status: r.status, ok: r.status === 200, headers: {}, text: r.text } }
+    })
+    return calls
+  }
+  const start = async ($: Engine, on: On) => {
+    on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
+    on('command.register', () => ({ value: undefined }) as never)
+    await $.session.start({ cwd: '.', surface: 'desktop', isInteractive: true } as never)
+  }
+
+  test('picked with a key, it asks mercury-decide on the Decisions router with typed questions, and Haiku is not asked', { options: OR } as never, async ($, on) => {
+    engine(on)
+    mock.clock(on)
+    const asked = judgeSays(on, '{"model":"haiku","effort":"low","why":"x"}')
+    const calls = fetches(on, () => ({ status: 200, text: jevReply('max') }))
+    const sent = recordSteps(on)
+    await $.prompt.submit({ text: 'redesign the whole relay', wait: false, origin: { kind: 'composer' } })
+    await step($)
+    expect(calls.length).toBe(1)
+    expect(calls[0].url).toBe('https://openrouter.ai/api/alpha/decisions')
+    expect(calls[0].headers.authorization).toBe('Bearer or-k')
+    expect(calls[0].body.model).toBe(OPENROUTER_MODEL)
+    expect(OPENROUTER_MODEL).toBe('inception/mercury-decide')
+    expect(calls[0].body.provider).toEqual({ data_collection: 'deny' })
+    expect(calls[0].body.state.next_message).toBe('redesign the whole relay')
+    expect(calls[0].body.questions.effort.type).toBe('choice')
+    expect(Object.keys(calls[0].body.questions.model.criteria)).toEqual(['haiku', 'sonnet', 'opus', 'fable'])
+    expect(asked.length).toBe(0)
+    expect(sent[0]).toEqual({ model: 'claude-opus-5-5', effort: 'max' })
+  })
+
+  test('the model setting is sent as given', { options: { ...OR, openrouterModel: 'typesafe/jev-1.13' } } as never, async ($, on) => {
+    engine(on)
+    mock.clock(on)
+    judgeSays(on, '{"model":"haiku","effort":"low","why":"x"}')
+    const calls = fetches(on, () => ({ status: 200, text: jevReply('high') }))
+    await $.prompt.submit({ text: 'a hard task', wait: false, origin: { kind: 'composer' } })
+    expect(calls[0].body.model).toBe('typesafe/jev-1.13')
+  })
+
+  test('unsure: Haiku makes the call', { options: OR } as never, async ($, on) => {
+    engine(on, {}, 'claude-sonnet-5-5')
+    mock.clock(on)
+    const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    fetches(on, () => ({ status: 200, text: jevReply('high', 0.3, 'sonnet') }))
+    await $.prompt.submit({ text: 'show me the last five commits please', wait: false, origin: { kind: 'composer' } })
+    expect(asked.length).toBe(1)
+  })
+
+  test('out of credits: told once, and Haiku judges', { options: OR } as never, async ($, on) => {
+    engine(on)
+    mock.clock(on)
+    const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    fetches(on, () => ({ status: 402, text: 'payment required' }))
+    const said: string[] = []
+    on('ui.toast', (_$, e) => {
+      said.push(String((e as { text?: string }).text ?? e))
+      return { value: undefined } as never
+    })
+    await $.prompt.submit({ text: 'first question here', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: 'second question here', wait: false, origin: { kind: 'composer' } })
+    expect(asked.length).toBe(2)
+    expect(said.filter(t => t.includes('OpenRouter is out of credits')).length).toBe(1)
+  })
+
+  test('an endpoint that never answers holds the prompt only for the timeout, then Haiku judges', { options: OR } as never, async ($, on) => {
+    engine(on)
+    const mocked = mock.clock(on)
+    const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    on('http.fetch', () => new Promise(() => undefined) as never)
+    const sent = recordSteps(on)
+    const submitted = $.prompt.submit({ text: 'hej', wait: false, origin: { kind: 'composer' } })
+    await mocked.advance(4500)
+    await submitted
+    await step($, 'high')
+    expect(asked.length).toBe(1)
+    expect(sent[0].effort).toBe('low')
+  })
+
+  test('a model OpenRouter does not serve is named', () => {
+    expect(judgeFailure('OpenRouter', 404)).toContain('OpenRouter has no model')
+    expect(judgeFailure('Jev', 404)).toBe('Jev failed (404)')
+  })
+
+  test('auto never sends a prompt to OpenRouter because OPENROUTER_API_KEY is set', async ($, on) => {
+    engine(on, { OPENROUTER_API_KEY: 'k', USERPROFILE: 'C:/Users/x' })
+    mock.clock(on)
+    const asked = judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    const calls = fetches(on, () => ({ status: 200, text: jevReply('low') }))
+    const read: string[] = []
+    on('fs.read', (_$, e) => {
+      read.push(e.path)
+      return { value: '' } as never
+    })
+    await $.prompt.submit({ text: 'hello there', wait: false, origin: { kind: 'composer' } })
+    expect(calls).toEqual([])
+    expect(read.filter(path => path.includes('openrouter'))).toEqual([])
+    expect(asked.length).toBe(1)
+  })
+
+  test('picked, the key comes from ~/.config/effortless/openrouter.env before OPENROUTER_API_KEY', { options: { judge: 'openrouter' } } as never, async ($, on) => {
+    engine(on, { OPENROUTER_API_KEY: 'from-env', USERPROFILE: 'C:/Users/x' })
+    mock.clock(on)
+    judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    on('fs.read', (_$, e) => ({ value: e.path.replaceAll('\\', '/').endsWith('.config/effortless/openrouter.env') ? 'OPENROUTER_API_KEY=from-file\n' : '' }) as never)
+    const calls = fetches(on, () => ({ status: 200, text: jevReply('high') }))
+    await $.prompt.submit({ text: 'a hard task', wait: false, origin: { kind: 'composer' } })
+    expect(calls[0].headers.authorization).toBe('Bearer from-file')
+  })
+
+  test('picked with no file, OPENROUTER_API_KEY is used', { options: { judge: 'openrouter' } } as never, async ($, on) => {
+    engine(on, { OPENROUTER_API_KEY: 'from-env', USERPROFILE: 'C:/Users/x' })
+    mock.clock(on)
+    judgeSays(on, '{"model":"sonnet","effort":"low","why":"x"}')
+    on('fs.read', () => ({ value: '' }) as never)
+    const calls = fetches(on, () => ({ status: 200, text: jevReply('high') }))
+    await $.prompt.submit({ text: 'a hard task', wait: false, origin: { kind: 'composer' } })
+    expect(calls[0].headers.authorization).toBe('Bearer from-env')
+  })
+
+  test('settings and key files', () => {
+    expect(readConfig({ judge: 'openrouter' }).judge).toBe('openrouter')
+    expect(readConfig({}).openrouterModel).toBe('inception/mercury-decide')
+    expect(readConfig({ openrouterModel: ' typesafe/jev-1.13 ' }).openrouterModel).toBe('typesafe/jev-1.13')
+    expect(withEnvKey('A=1\n', 'OPENROUTER_API_KEY', 'k')).toBe('A=1\nOPENROUTER_API_KEY=k\n')
+    expect(withEnvKey('OPENROUTER_API_KEY=old', 'OPENROUTER_API_KEY', 'new')).toBe('OPENROUTER_API_KEY=new')
+    expect(parseEnvKey('X=1\nOPENROUTER_API_KEY="q"\n', 'OPENROUTER_API_KEY')).toBe('q')
+    expect(asSpent({ judge: { jev: 2 } }).judge.openrouter).toBe(0)
+  })
+
+  test('setup: Add OpenRouter asks for its key, saves it to its own file and picks the judge', async ($, on) => {
+    engine(on, { USERPROFILE: '/home/x' })
+    mock.clock(on)
+    const set: { key: string; value: unknown }[] = []
+    on('config.set', (_$, e) => {
+      set.push({ key: e.key, value: e.value })
+      return { value: e.value } as never
+    })
+    const files: Record<string, string> = {}
+    const at = (path: string) => path.split('\\').join('/')
+    on('fs.read', (_$, e) => ({ value: files[at(e.path)] ?? '' }) as never)
+    on('fs.write', (_$, e) => {
+      files[at(e.path)] = e.text
+      return { value: undefined } as never
+    })
+    await start($, on)
+    const band = await $.ui.mount(DESK_BAND)
+    await band.press({ key: 'setup-openrouter' })
+    expect(await drawn(band)).toContain('openrouter.ai/keys')
+    await band.input({ key: 'setup-or-key', text: 'or-new' })
+    expect(files['/home/x/.config/effortless/openrouter.env']).toBe('OPENROUTER_API_KEY=or-new\n')
+    expect(await band.find({ key: 'setup-bias2' })).toBeDefined()
+    await band.press({ key: 'setup-close' })
+    expect(set).toContainEqual({ key: 'effortless.judge', value: 'openrouter' })
+    await band.unmount()
+  })
+
+  test('settings: picking OpenRouter and pressing Test asks it and says it answered', { options: { layout: 'default', openrouterKey: 'or-k' } } as never, async ($, on) => {
+    engine(on)
+    mock.clock(on)
+    const calls = fetches(on, () => ({ status: 200, text: jevReply('low') }))
+    await start($, on)
+    const guide = await $.ui.mount(DESK_BAND)
+    await guide.press({ key: 'setup-close' })
+    await guide.unmount()
+    const band = await $.ui.mount(DESK_BAND)
+    await band.press({ key: 'dash-settings' })
+    await band.press({ key: 'settings-card-judge' })
+    await band.select({ key: 'settings-judge-pick', value: 'openrouter' })
+    expect(await band.find({ key: 'settings-or-key' })).toBeDefined()
+    expect(await band.find({ key: 'settings-or-model' })).toBeDefined()
+    await band.press({ key: 'settings-judge-test' })
+    const result = async () => (await band.findAll({ type: 'Text' })).map(t => t.text).find(t => /^[✓✗]/.test(t))
+    expect(await result()).toContain('✓ OpenRouter answered: low in')
+    expect(calls[0].url).toBe('https://openrouter.ai/api/alpha/decisions')
+    await band.unmount()
   })
 })

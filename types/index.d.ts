@@ -11,7 +11,7 @@ export type Spent = {
   out: number
   byEffort: Partial<Record<Effort, { prompts: number; cost: number }>>
   /** How often each judge decided, the time it took in all (ms), and its tokens. */
-  judge: { jev: number; haiku: number; ms: number; tokens: number }
+  judge: { jev: number; openrouter: number; haiku: number; ms: number; tokens: number }
   /** Prompts that ran on a cheaper model than the chat's, and how many of those the person then redid. */
   moved: number
   redone: number
@@ -26,7 +26,7 @@ export type Pick = {
   /** A few words on why, shown dim in the band. */
   why: string
   /** named: the person said the level in the prompt ("max effort"). */
-  by: 'jev' | 'haiku' | 'manual' | 'named'
+  by: 'jev' | 'openrouter' | 'haiku' | 'manual' | 'named'
   /** How sure the judge was of the effort, 0-1, when it said. */
   sure?: number
   /** Haiku only: why a handoff would suit now (a few words), when it said it would. */
@@ -52,6 +52,10 @@ export type SettingsDraft = {
   /** Comma-separated parts switched off: handoff, cold, swamp, hot, down. */
   hide?: string
   key?: string
+  /** An OpenRouter key pasted for the openrouter judge, saved to its own file. */
+  openrouterKey?: string
+  /** The Decisions model the openrouter judge asks, e.g. inception/mercury-decide. */
+  openrouterModel?: string
   swampAt?: string
   /** default (dashboard band) or minimal (footer buttons). */
   layout?: string
@@ -190,7 +194,7 @@ declare module 'claude-code' {
       /** A new version above the prompt: offered, updating, updated or failed, or null. */
       updateCard: { stage: 'offer' | 'updating' | 'done' | 'failed'; version: string; note: string; at: number; detail?: string } | null
       /** The setup guide's step, or null when it is closed. */
-      setupStep: 'pick' | 'jev' | 'lean' | 'handoff' | 'done' | null
+      setupStep: 'pick' | 'jev' | 'openrouter' | 'lean' | 'handoff' | 'done' | null
       /** Choices made in the setup guide, saved together at Done or the cross. */
       setupDraft: SettingsDraft
       /** Auto on model: the judge may suggest another model (never switched without a yes). Off by default. */

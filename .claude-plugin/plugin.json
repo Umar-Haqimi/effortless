@@ -7,12 +7,13 @@
     "judge": {
       "type": "string",
       "title": "Judge",
-      "description": "Haiku (your own Claude login, no key) always judges handoffs and, unless Jev answers, the effort. auto: Jev as well when a TypeSafe key is set. haiku: Haiku only. jev: Jev as well, and its key may also come from ~/.config/jev/.env.",
+      "description": "Haiku (your own Claude login, no key) always judges handoffs and, unless Jev or OpenRouter answers, the effort. auto: Jev as well when a TypeSafe key is set. haiku: Haiku only. jev: Jev as well, and its key may also come from ~/.config/jev/.env. openrouter: a decision model on OpenRouter's Decisions API (see OpenRouter model), its key from below, ~/.config/effortless/openrouter.env or OPENROUTER_API_KEY.",
       "default": "auto",
       "options": [
         "auto",
         "haiku",
-        "jev"
+        "jev",
+        "openrouter"
       ]
     },
     "typesafeKey": {
@@ -21,6 +22,19 @@
       "description": "For the jev judge. Stored as a secret by Claude Code. Left empty, TYPESAFE_API_KEY is used, and with judge set to jev also ~/.config/jev/.env.",
       "sensitive": true,
       "default": ""
+    },
+    "openrouterKey": {
+      "type": "string",
+      "title": "OpenRouter API key (optional, only for openrouter)",
+      "description": "For the openrouter judge. Stored as a secret by Claude Code. Left empty, with judge set to openrouter, ~/.config/effortless/openrouter.env and then OPENROUTER_API_KEY are used.",
+      "sensitive": true,
+      "default": ""
+    },
+    "openrouterModel": {
+      "type": "string",
+      "title": "OpenRouter model",
+      "description": "The decision model the openrouter judge asks on OpenRouter's Decisions API, e.g. inception/mercury-decide or typesafe/jev-1.13.",
+      "default": "inception/mercury-decide"
     },
     "handoffSkill": {
       "type": "string",

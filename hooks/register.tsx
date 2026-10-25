@@ -76,7 +76,11 @@ const EFFORT_LABELS: Record<Effort, string> = { low: 'Low', medium: 'Medium', hi
 const isAuto = atom({ plugin: 'effortless', key: 'isAuto' } as const, true)
 const JEV_TIMEOUT_MS = 3000
 const JEV_URL = 'https://api.typesafe.ai/v1/systemone'
-const EMPTY_SPENT: Spent = { prompts: 0, requests: 0, input: 0, write: 0, read: 0, out: 0, byEffort: {}, judge: { jev: 0, haiku: 0, ms: 0, tokens: 0 }, moved: 0, redone: 0 }
+// OpenRouter's Decisions router takes the same typed questions as Jev, for any decision model it serves.
+const OPENROUTER_TIMEOUT_MS = 4000
+const OPENROUTER_URL = 'https://openrouter.ai/api/alpha/decisions'
+export const OPENROUTER_MODEL = 'inception/mercury-decide'
+const EMPTY_SPENT: Spent = { prompts: 0, requests: 0, input: 0, write: 0, read: 0, out: 0, byEffort: {}, judge: { jev: 0, openrouter: 0, haiku: 0, ms: 0, tokens: 0 }, moved: 0, redone: 0 }
 const SWITCHED_MS = 2500
 // The prompt cache lives this long after the last request read or wrote it. A response may say which lifetime its
 // cache writes got (usage.cache_creation: ephemeral_1h / ephemeral_5m); until one does, 1 hour is assumed: 99% of
@@ -516,10 +520,15 @@ export function keepsEffort(message: string, context: string): boolean {
   return isFollowUp(message) && !endsOnQuestion(context)
 }
 
+/** The value of a NAME=value line in an .env file's text, quoted or not. */
+export function parseEnvKey(text: string, name: string): string | undefined {
+  const value = text.match(new RegExp(`^\\s*${name}\\s*=\\s*(.*?)\\s*$`, 'm'))?.[1].replace(/^['"]|['"]$/g, '')
+  return value || undefined
+}
+
 /** The TypeSafe key in a ~/.config/jev/.env file's text, the same file the jev-* skills read. */
 export function parseJevKey(text: string): string | undefined {
-  const value = text.match(/^\s*TYPESAFE_API_KEY\s*=\s*(.*?)\s*$/m)?.[1].replace(/^['"]|['"]$/g, '')
-  return value || undefined
+  return parseEnvKey(text, 'TYPESAFE_API_KEY')
 }
 
 /**
@@ -569,7 +578,34 @@ async function jevKey($: EngineInterface): Promise<string | undefined> {
   return askJevFile
 }
 
+/** Where a key pasted for the openrouter judge is kept: a plugin cannot write the app's secret settings. */
+const openrouterFile = (home: string) => `${home}/.config/effortless/openrouter.env`
+let askOpenRouterFile: EnvAsk
+/**
+ * The OpenRouter key: from the settings, else ~/.config/effortless/openrouter.env, else OPENROUTER_API_KEY. The file and
+ * the variable count only when the person picked the openrouter judge: many have OPENROUTER_API_KEY set for other tools,
+ * and that alone must not send their prompts to OpenRouter.
+ */
+async function openrouterKey($: EngineInterface, judgeKind: string = config.judge): Promise<string | undefined> {
+  if (config.openrouterKey) return config.openrouterKey
+  if (judgeKind !== 'openrouter') return undefined
+  askOpenRouterFile =
+    askOpenRouterFile ??
+    (async () => {
+      const home = (await envUserProfile($)) ?? (await envHome($))
+      if (!home) return undefined
+      const text = await $.fs.read(openrouterFile(home)).catch(() => '')
+      return parseEnvKey(typeof text === 'string' ? text : '', 'OPENROUTER_API_KEY')
+    })()
+  return (await askOpenRouterFile) ?? (await envOpenRouterKey($))
+}
+
 type Judged = { verdict?: Pick; tokens: number }
+
+/** Who made a pick, as the band's judge line names them. */
+function judgeLabel(by: Pick['by'] | undefined): string {
+  return by === 'manual' || by === 'named' ? 'You' : by === 'jev' ? 'Jev' : by === 'openrouter' ? 'OpenRouter' : 'Haiku'
+}
 
 /** Why a judge the person picked could not answer, in words: what a status code means for them. */
 export function judgeFailure(name: string, status: number | 'timeout'): string {
@@ -577,6 +613,7 @@ export function judgeFailure(name: string, status: number | 'timeout'): string {
   if (status === 401 || status === 403) return `${name} rejected the key (${status})`
   if (status === 402) return `${name} is out of credits (${status})`
   if (status === 429) return `${name} is rate limited (${status})`
+  if (status === 404 && name === 'OpenRouter') return `OpenRouter has no model ${config.openrouterModel} (404)`
   return `${name} failed (${status})`
 }
 const warned = new Set<string>()
@@ -596,8 +633,12 @@ function warnJudge($: EngineInterface, reason: string) {
 
 /** Which judge the person picked in the plugin's settings, and what it needs. */
 export type JudgeConfig = {
-  judge: 'auto' | 'haiku' | 'jev'
+  judge: 'auto' | 'haiku' | 'jev' | 'openrouter'
   typesafeKey: string
+  /** For the openrouter judge; stored as a secret by the app. */
+  openrouterKey: string
+  /** The decision model the openrouter judge asks on OpenRouter's Decisions router. */
+  openrouterModel: string
   /** A skill or slash command that writes the handoff instead of the built-in prompt, e.g. "session-handoff". */
   handoffSkill: string
   /** What follows the handoff: clear and carry on, clear and wait, or keep the chat and copy the handoff. The handoff
@@ -642,6 +683,8 @@ let pluginOptions: Record<string, unknown> = {}
 let config: JudgeConfig = {
   judge: 'auto',
   typesafeKey: '',
+  openrouterKey: '',
+  openrouterModel: OPENROUTER_MODEL,
   handoffSkill: '',
   handoffAfter: 'continue',
   bias: 0,
@@ -664,8 +707,10 @@ export function readConfig(options: unknown): JudgeConfig {
   const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '')
   const picked = str(o.judge)
   return {
-    judge: picked === 'haiku' || picked === 'jev' ? picked : 'auto',
+    judge: picked === 'haiku' || picked === 'jev' || picked === 'openrouter' ? picked : 'auto',
     typesafeKey: str(o.typesafeKey),
+    openrouterKey: str(o.openrouterKey),
+    openrouterModel: str(o.openrouterModel) || OPENROUTER_MODEL,
     handoffSkill: str(o.handoffSkill).replace(/^\//, ''),
     handoffAfter: (['confirm', 'copy'] as const).find(a => a === str(o.handoffAfter)) ?? 'continue',
     bias: Math.max(-2, Math.min(2, Math.round(Number(str(o.effortBias)) || 0))),
@@ -707,6 +752,12 @@ function judgeQuestion(prompt: string, current: Pick | null, context: string): s
  */
 async function judge($: EngineInterface, prompt: string, current: Pick | null): Promise<Judged> {
   const context = await recentContext($).catch(() => '')
+  if (config.judge === 'openrouter') {
+    const orKey = await openrouterKey($).catch(() => undefined)
+    const or = orKey ? await askOpenRouter($, orKey, prompt, current, context) : undefined
+    if (or) return or.verdict?.why === UNSURE ? haikuAfter($, or, prompt, current, context) : or
+    return askHaiku($, prompt, current, context)
+  }
   const key = config.judge !== 'haiku' ? await jevKey($).catch(() => undefined) : undefined
   if (key) {
     const jev = await askJev($, key, prompt, current, context)
@@ -715,22 +766,35 @@ async function judge($: EngineInterface, prompt: string, current: Pick | null): 
   return askHaiku($, prompt, current, context)
 }
 
-/** Jev was unsure: Haiku makes the call, and both judges' tokens count. */
+/** Jev or OpenRouter was unsure: Haiku makes the call, and both judges' tokens count. */
 async function haikuAfter($: EngineInterface, jev: Judged, prompt: string, current: Pick | null, context: string): Promise<Judged> {
   const haiku = await askHaiku($, prompt, current, context)
   return haiku.verdict ? { verdict: haiku.verdict, tokens: haiku.tokens + jev.tokens } : jev
 }
 
-/** Jev on TypeSafe: an answer, or nothing when it fails, is unsure of its own format or takes too long. */
-async function askJev($: EngineInterface, key: string, prompt: string, current: Pick | null, context: string): Promise<Judged | undefined> {
+/** A Decisions endpoint (TypeSafe's or OpenRouter's) and what to send it. */
+type DecisionsJudge = {
+  name: 'Jev' | 'OpenRouter'
+  by: 'jev' | 'openrouter'
+  url: string
+  key: string
+  model: string
+  timeoutMs: number
+  headers?: Record<string, string>
+  body?: Record<string, unknown>
+}
+
+/** The effort and model asked as typed questions: an answer, or nothing when it fails, is unsure of its own format or takes too long. */
+async function askDecisions($: EngineInterface, j: DecisionsJudge, prompt: string, current: Pick | null, context: string): Promise<Judged | undefined> {
   try {
-    // A stalled endpoint must not hold the prompt: after JEV_TIMEOUT_MS the judge falls through to Haiku.
+    // A stalled endpoint must not hold the prompt: after the timeout the judge falls through to Haiku.
     const res = await Promise.race([
-      $.http.fetch((await envJevUrl($)) ?? JEV_URL, {
+      $.http.fetch(j.url, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${j.key}`, ...j.headers },
         body: JSON.stringify({
-          model: 'jev-latest',
+          model: j.model,
+          ...j.body,
           state: {
             task: JEV_TASK,
             current_model: current?.model ?? null,
@@ -744,11 +808,11 @@ async function askJev($: EngineInterface, key: string, prompt: string, current: 
           },
         }),
       }),
-      $.clock.sleep(JEV_TIMEOUT_MS).then(() => {
-        throw new Error('jev timeout')
+      $.clock.sleep(j.timeoutMs).then(() => {
+        throw new Error(`${j.by} timeout`)
       }),
     ])
-    if (!res.ok) warnJudge($, judgeFailure('Jev', res.status))
+    if (!res.ok) warnJudge($, judgeFailure(j.name, res.status))
     const verdict = res.ok ? parseJevAnswer(res.text, current) : undefined
     if (verdict) {
       let used = 0
@@ -759,13 +823,41 @@ async function askJev($: EngineInterface, key: string, prompt: string, current: 
         // No usage in the reply: counted as 0.
       }
       if (await read($, judgeDown)) await update($, judgeDown, () => null)
-      return { verdict: { ...verdict, by: 'jev' }, tokens: used }
+      return { verdict: { ...verdict, by: j.by }, tokens: used }
     }
   } catch (error) {
-    // Jev down or slow: fall through to Haiku, and say so.
-    warnJudge($, String(error).includes('timeout') ? judgeFailure('Jev', 'timeout') : 'Jev could not be reached')
+    // Down or slow: fall through to Haiku, and say so.
+    warnJudge($, String(error).includes('timeout') ? judgeFailure(j.name, 'timeout') : `${j.name} could not be reached`)
   }
   return undefined
+}
+
+/** Jev on TypeSafe. */
+async function askJev($: EngineInterface, key: string, prompt: string, current: Pick | null, context: string): Promise<Judged | undefined> {
+  const url = (await envJevUrl($)) ?? JEV_URL
+  return askDecisions($, { name: 'Jev', by: 'jev', url, key, model: 'jev-latest', timeoutMs: JEV_TIMEOUT_MS }, prompt, current, context)
+}
+
+/** A decision model (inception/mercury-decide unless set) on OpenRouter's Decisions router. */
+async function askOpenRouter($: EngineInterface, key: string, prompt: string, current: Pick | null, context: string, model = config.openrouterModel): Promise<Judged | undefined> {
+  const url = (await envOpenRouterUrl($)) ?? OPENROUTER_URL
+  return askDecisions(
+    $,
+    {
+      name: 'OpenRouter',
+      by: 'openrouter',
+      url,
+      key,
+      model,
+      timeoutMs: OPENROUTER_TIMEOUT_MS,
+      // OpenRouter's app attribution, and only providers that keep no copy of the person's prompts.
+      headers: { 'http-referer': 'https://heycubit.github.io/effortless/', 'x-title': 'effortless' },
+      body: { provider: { data_collection: 'deny' } },
+    },
+    prompt,
+    current,
+    context,
+  )
 }
 
 // Set while the settings panel tests a judge: warnJudge leaves its reason here instead of warning.
@@ -775,13 +867,20 @@ const JUDGE_TEST_PROMPT = 'rename one variable in a single file'
 
 /** Asks the judge picked in the panel (its unsaved key, URL and model included) one sample prompt, and says in a line
  * whether it answered, with what and how fast, or why not. Never falls back to Haiku: the point is the judge itself. */
-async function testJudge($: EngineInterface, judgeKind: string, draftKey: string): Promise<{ ok: boolean; text: string }> {
+async function testJudge($: EngineInterface, judgeKind: string, draftKey: string, draftModel = ''): Promise<{ ok: boolean; text: string }> {
   const start = await $.clock.now()
   const took = async () => `${(((await $.clock.now()) - start) / 1000).toFixed(1)} s`
   const said = (name: string, j: Judged | undefined) =>
     j?.verdict?.why === UNSURE ? `${name} answered, unsure on the sample` : `${name} answered: ${j?.verdict?.effort}`
   judgeTesting = {}
   try {
+    if (judgeKind === 'openrouter') {
+      const key = parseEnvKey(draftKey, 'OPENROUTER_API_KEY') ?? (draftKey.trim() || undefined) ?? (await openrouterKey($, 'openrouter').catch(() => undefined))
+      if (!key) return { ok: false, text: 'No OpenRouter key found' }
+      const j = await askOpenRouter($, key, JUDGE_TEST_PROMPT, null, '', draftModel.trim() || config.openrouterModel)
+      if (j?.verdict) return { ok: true, text: `${said('OpenRouter', j)} in ${await took()}` }
+      return { ok: false, text: judgeTesting.reason ?? 'OpenRouter gave no usable answer' }
+    }
     if (judgeKind === 'jev' || judgeKind === 'auto') {
       const key = parseJevKey(draftKey) ?? (draftKey.trim() || undefined) ?? (await jevKey($).catch(() => undefined)) ?? (await typesafeKeyAnywhere($).catch(() => undefined))
       if (!key && judgeKind === 'jev') return { ok: false, text: 'No TypeSafe key found' }
@@ -982,6 +1081,16 @@ async function runBench($: EngineInterface, cases: BenchCase[]): Promise<BenchAn
         return jev.verdict?.why === UNSURE ? haikuAfter($, jev, c.message, c.current, c.context ?? '') : jev
       },
     ])
+  const orKey = await openrouterKey($, 'openrouter').catch(() => undefined)
+  if (orKey)
+    judges.push([
+      'openrouter',
+      async c => {
+        const or = await askOpenRouter($, orKey, c.message, c.current, c.context ?? '')
+        if (!or) return askHaiku($, c.message, c.current, c.context ?? '')
+        return or.verdict?.why === UNSURE ? haikuAfter($, or, c.message, c.current, c.context ?? '') : or
+      },
+    ])
   const answers: BenchAnswer[] = []
   // Baselines: what a fixed effort would score on the same labels.
   for (const fixed of ['medium', 'high'] as Effort[])
@@ -1043,6 +1152,8 @@ let askTmpdir: EnvAsk
 let askModelUi: EnvAsk
 let askJevUrl: EnvAsk
 let askJevKey: EnvAsk
+let askOpenRouterUrl: EnvAsk
+let askOpenRouterKey: EnvAsk
 let askUserProfile: EnvAsk
 let askHome: EnvAsk
 const envLog = ($: EngineInterface) => (askLog = askLog ?? $.env.get('EFFORTLESS_LOG'))
@@ -1051,6 +1162,8 @@ const envTmpdir = ($: EngineInterface) => (askTmpdir = askTmpdir ?? $.env.get('T
 const envModelUi = ($: EngineInterface) => (askModelUi = askModelUi ?? $.env.get('EFFORTLESS_MODEL_UI'))
 const envJevUrl = ($: EngineInterface) => (askJevUrl = askJevUrl ?? $.env.get('JEV_URL'))
 const envJevKey = ($: EngineInterface) => (askJevKey = askJevKey ?? $.env.get('TYPESAFE_API_KEY'))
+const envOpenRouterUrl = ($: EngineInterface) => (askOpenRouterUrl = askOpenRouterUrl ?? $.env.get('OPENROUTER_DECISIONS_URL'))
+const envOpenRouterKey = ($: EngineInterface) => (askOpenRouterKey = askOpenRouterKey ?? $.env.get('OPENROUTER_API_KEY'))
 const envUserProfile = ($: EngineInterface) => (askUserProfile = askUserProfile ?? $.env.get('USERPROFILE'))
 const envHome = ($: EngineInterface) => (askHome = askHome ?? $.env.get('HOME'))
 
@@ -1135,7 +1248,7 @@ export function asSpent(t: unknown): Spent {
     read: num(v.read),
     out: num(v.out),
     byEffort: v.byEffort && typeof v.byEffort === 'object' ? v.byEffort : {},
-    judge: { jev: num(judged.jev), haiku: num(judged.haiku), ms: num(judged.ms), tokens: num(judged.tokens) },
+    judge: { jev: num(judged.jev), openrouter: num(judged.openrouter), haiku: num(judged.haiku), ms: num(judged.ms), tokens: num(judged.tokens) },
     moved: num(v.moved),
     redone: num(v.redone),
     helpers: {
@@ -1186,6 +1299,7 @@ async function countPrompt($: EngineInterface, effort: Effort | undefined, by: P
     const t = asSpent(old)
     const judged = {
       jev: t.judge.jev + (by === 'jev' ? 1 : 0),
+      openrouter: t.judge.openrouter + (by === 'openrouter' ? 1 : 0),
       haiku: t.judge.haiku + (by === 'haiku' ? 1 : 0),
       ms: t.judge.ms + ms,
       tokens: t.judge.tokens + judgeTokens,
@@ -1798,6 +1912,7 @@ const ICON_HANDOFF = '⇥'
 const ICON_SHOW = '◉'
 const SETTING_FIELDS = {
   judge: 'judge',
+  openrouterModel: 'openrouterModel',
   bias: 'effortBias',
   floor: 'effortFloor',
   ceiling: 'effortCeiling',
@@ -1829,6 +1944,7 @@ async function saveSetting($: EngineInterface, field: keyof typeof SETTING_FIELD
   if (deny && !stored) $.ui.toast(`effortless: could not save ${field}: ${String(deny).slice(0, 120)}`)
   const raw: Record<string, unknown> = {
     judge: config.judge,
+    openrouterModel: config.openrouterModel,
     effortBias: String(config.bias),
     effortFloor: config.floor,
     effortCeiling: config.ceiling,
@@ -1845,7 +1961,7 @@ async function saveSetting($: EngineInterface, field: keyof typeof SETTING_FIELD
     appearance: config.appearance,
     [SETTING_FIELDS[field]]: value,
   }
-  config = { ...readConfig(raw), typesafeKey: config.typesafeKey }
+  config = { ...readConfig(raw), typesafeKey: config.typesafeKey, openrouterKey: config.openrouterKey }
   applyTheme()
   $.ui.invalidate('ui.render')
 }
@@ -1866,15 +1982,17 @@ function savedCardTree($: EngineInterface, e: RenderInput<'AbovePrompt'>) {
 /** Saves every change in the panel's draft, then closes the panel. Nothing changed applies before this. */
 async function saveDraft($: EngineInterface) {
   const draft = await read($, settingsDraft)
-  const { key, ...rest } = draft
+  const { key, openrouterKey: orKey, ...rest } = draft
   // The key goes to its file first; the settings then go through the store queue, since each one reloads the plugin.
   if (key?.trim()) await saveJevKey($, key, false)
+  if (orKey?.trim()) await saveOpenRouterKey($, orKey, false)
   const changes: Record<string, string> = {}
   for (const field of Object.keys(SETTING_FIELDS) as (keyof typeof SETTING_FIELDS)[]) {
     const value = rest[field]
     if (value !== undefined) changes[field] = value
   }
   if (key?.trim() && (changes.judge ?? config.judge) !== 'jev') changes.judge = 'jev'
+  if (orKey?.trim() && (changes.judge ?? config.judge) !== 'openrouter') changes.judge = 'openrouter'
   await update($, settingsDraft, () => ({}))
   await update($, settingsOpen, () => false)
   // Said by a card above the prompt, not a toast. Kept in the store: each setting written reloads the plugin.
@@ -1884,11 +2002,17 @@ async function saveDraft($: EngineInterface) {
   await drainSetupSave($)
 }
 
-/** A TYPESAFE_API_KEY line set in an .env file's text: replaced where it is, added where it is not. */
-export function withJevKey(text: string, key: string): string {
-  const line = `TYPESAFE_API_KEY=${key}`
-  if (/^\s*TYPESAFE_API_KEY\s*=.*$/m.test(text)) return text.replace(/^\s*TYPESAFE_API_KEY\s*=.*$/m, line)
+/** A NAME=key line set in an .env file's text: replaced where it is, added where it is not. */
+export function withEnvKey(text: string, name: string, key: string): string {
+  const line = `${name}=${key}`
+  const found = new RegExp(`^\\s*${name}\\s*=.*$`, 'm')
+  if (found.test(text)) return text.replace(found, line)
   return `${text}${text && !text.endsWith('\n') ? '\n' : ''}${line}\n`
+}
+
+/** A TYPESAFE_API_KEY line set in an .env file's text. */
+export function withJevKey(text: string, key: string): string {
+  return withEnvKey(text, 'TYPESAFE_API_KEY', key)
 }
 
 /**
@@ -1896,28 +2020,46 @@ export function withJevKey(text: string, key: string): string {
  * app's secret settings. From then on that file wins over an older key in the settings.
  */
 async function saveJevKey($: EngineInterface, key: string, setJudge = true) {
-  const clean = key.trim()
-  if (!clean) return
-  const home = (await envUserProfile($)) ?? (await envHome($))
-  if (!home) {
-    $.ui.toast('effortless: no home folder found to save the key in.')
-    return
-  }
-  const path = `${home}/.config/jev/.env`
-  const before = await $.fs.read(path).catch(() => '')
-  try {
-    await $.fs.write(path, withJevKey(typeof before === 'string' ? before : '', clean))
-  } catch (error) {
-    $.ui.toast(`effortless: could not save the key: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`)
-    return
-  }
+  if (!(await writeKeyFile($, home => `${home}/.config/jev/.env`, 'TYPESAFE_API_KEY', key))) return
   await $.store.set('keyFromFile', true)
   keyFromFile = true
   askJevFile = undefined
   if (setJudge && config.judge !== 'jev') await saveSetting($, 'judge', 'jev')
+  keySaved($, 'Jev')
+}
+
+/** A key pasted for the openrouter judge goes to ~/.config/effortless/openrouter.env, read only when that judge is picked. */
+async function saveOpenRouterKey($: EngineInterface, key: string, setJudge = true) {
+  if (!(await writeKeyFile($, openrouterFile, 'OPENROUTER_API_KEY', key))) return
+  askOpenRouterFile = undefined
+  if (setJudge && config.judge !== 'openrouter') await saveSetting($, 'judge', 'openrouter')
+  keySaved($, 'OpenRouter')
+}
+
+/** Writes NAME=key into the .env file under the home folder; false (and said) when it could not. */
+async function writeKeyFile($: EngineInterface, pathIn: (home: string) => string, name: string, key: string): Promise<boolean> {
+  const clean = key.trim()
+  if (!clean) return false
+  const home = (await envUserProfile($)) ?? (await envHome($))
+  if (!home) {
+    $.ui.toast('effortless: no home folder found to save the key in.')
+    return false
+  }
+  const path = pathIn(home)
+  const before = await $.fs.read(path).catch(() => '')
+  try {
+    await $.fs.write(path, withEnvKey(typeof before === 'string' ? before : '', name, clean))
+  } catch (error) {
+    $.ui.toast(`effortless: could not save the key: ${(error instanceof Error ? error.message : String(error)).slice(0, 120)}`)
+    return false
+  }
+  return true
+}
+
+async function keySaved($: EngineInterface, name: string) {
   await update($, judgeDown, () => null)
   warned.clear()
-  $.ui.toast('effortless: key saved. Jev judges from the next message.')
+  $.ui.toast(`effortless: key saved. ${name} judges from the next message.`)
   $.ui.invalidate('ui.render')
 }
 
@@ -1936,7 +2078,7 @@ async function typesafeKeyAnywhere($: EngineInterface): Promise<string | undefin
   return parseJevKey(typeof text === 'string' ? text : '')
 }
 
-export type SetupStep = 'pick' | 'jev' | 'lean' | 'handoff' | 'look' | 'done'
+export type SetupStep = 'pick' | 'jev' | 'openrouter' | 'lean' | 'handoff' | 'look' | 'done'
 
 /** The lean's five stops, cheaper to smarter: a name, and what it does to the judge's pick (see tipped). */
 export const LEAN_STOPS = [
@@ -1949,7 +2091,7 @@ export const LEAN_STOPS = [
 
 /** The guide's step after this one: the judge (with its key or URL), the lean, the handoff, then done. */
 export function setupNext(step: SetupStep): SetupStep | null {
-  if (step === 'pick' || step === 'jev') return 'lean'
+  if (step === 'pick' || step === 'jev' || step === 'openrouter') return 'lean'
   if (step === 'lean') return 'handoff'
   if (step === 'handoff') return 'look'
   if (step === 'look') return 'done'
@@ -1958,7 +2100,7 @@ export function setupNext(step: SetupStep): SetupStep | null {
 
 /** The step Back goes to: the judge's key or URL goes back to the pick, as does the lean. */
 export function setupBack(step: SetupStep): SetupStep | null {
-  if (step === 'jev' || step === 'lean') return 'pick'
+  if (step === 'jev' || step === 'openrouter' || step === 'lean') return 'pick'
   if (step === 'handoff') return 'lean'
   if (step === 'look') return 'handoff'
   if (step === 'done') return 'look'
@@ -1967,7 +2109,7 @@ export function setupBack(step: SetupStep): SetupStep | null {
 
 /** "2/3" for the step shown; the closing step has no number. */
 export function setupCounter(step: SetupStep): string {
-  const n = { pick: 1, jev: 1, lean: 2, handoff: 3, look: 4, done: 0 }[step]
+  const n = { pick: 1, jev: 1, openrouter: 1, lean: 2, handoff: 3, look: 4, done: 0 }[step]
   return n ? `${n}/4` : ''
 }
 
@@ -2050,7 +2192,7 @@ async function closeSetup($: EngineInterface) {
 }
 
 /** The person picked a judge in the guide: then the judge's key or URL, or the next step. Saved at the end. */
-async function pickJudge($: EngineInterface, choice: 'haiku' | 'jev') {
+async function pickJudge($: EngineInterface, choice: 'haiku' | 'jev' | 'openrouter') {
   // Haiku is saved as Auto: Jev whenever a TypeSafe key is there, Haiku otherwise and whenever Jev does not answer.
   await update($, setupDraft, d => ({ ...d, judge: choice === 'haiku' ? 'auto' : choice }))
   await markSetupDone($)
@@ -2060,6 +2202,10 @@ async function pickJudge($: EngineInterface, choice: 'haiku' | 'jev') {
   }
   if (choice === 'jev' && (await findTypesafeKey($))) {
     $.ui.toast('effortless: Jev judges with the TypeSafe key it found.')
+    return goSetup($, 'lean')
+  }
+  if (choice === 'openrouter' && (await openrouterKey($, 'openrouter'))) {
+    $.ui.toast('effortless: OpenRouter judges with the key it found.')
     return goSetup($, 'lean')
   }
   await goSetup($, choice)
@@ -2081,7 +2227,7 @@ const share = (part: number, whole: number) => `${Math.round((part / whole) * 10
  */
 export function savedText(raw: Spent): string {
   const t = asSpent(raw)
-  const judged = t.judge.jev + t.judge.haiku
+  const judged = t.judge.jev + t.judge.openrouter + t.judge.haiku
   const helperRuns = EFFORTS.reduce((n, e) => n + (t.helpers.runs[e] ?? 0), 0)
   if (t.prompts === 0 && judged === 0 && t.moved === 0 && helperRuns === 0) return 'nothing measured yet'
   const input = t.input * WEIGHT.input
@@ -2106,7 +2252,7 @@ export function savedText(raw: Spent): string {
     lines.push(`Helpers: ${helperRuns} subagent${helperRuns === 1 ? '' : 's'} (${per.join(', ')}), ${t.helpers.requests} requests, cost about ${tokens(Math.round(t.helpers.cost))} tokens`)
   }
   if (judged) {
-    lines.push(`Judge: Jev ${t.judge.jev}, Haiku ${t.judge.haiku}, average ${Math.round(t.judge.ms / judged)} ms, ${tokens(t.judge.tokens)} tokens in all`)
+    lines.push(`Judge: Jev ${t.judge.jev}, ${t.judge.openrouter ? `OpenRouter ${t.judge.openrouter}, ` : ''}Haiku ${t.judge.haiku}, average ${Math.round(t.judge.ms / judged)} ms, ${tokens(t.judge.tokens)} tokens in all`)
   }
   return lines.join('\n')
 }
@@ -3265,7 +3411,7 @@ async function dashboardBand($: EngineInterface, e: RenderInput<'AbovePrompt'>) 
   const effortNow = effortOf(v, v.modelNow ?? (await sessionModel($)))
   const by = v.current?.by
   const reason = v.current
-    ? `${by === 'manual' || by === 'named' ? 'You' : by === 'jev' ? 'Jev' : 'Haiku'}: ${v.current.why}`
+    ? `${judgeLabel(by)}: ${v.current.why}`
     : v.auto
       ? 'Auto picks the effort at the next prompt'
       : 'You pick the effort'
@@ -3548,7 +3694,7 @@ async function effortRows($: EngineInterface, e: RenderInput<'AbovePrompt'>, opt
     : notAligned
       ? `/effort shows ${EFFORT_LABELS[shownByApp as Effort] ?? shownByApp}`
       : current
-        ? `${current.by === 'manual' ? 'You' : current.by === 'jev' ? 'Jev' : 'Haiku'}: ${current.why}`
+        ? `${current.by === 'named' ? 'Haiku' : judgeLabel(current.by)}: ${current.why}`
         : auto
           ? 'Picks the effort at the next prompt'
           : 'Pick an effort'
@@ -4537,6 +4683,7 @@ Saved to ${out}.md and .json` }
       // cannot open a file dialog, and a skill is run by its name anyway.
       const skillNames = await read($, installedSkills)
       const hasKey = Boolean(await jevKey($).catch(() => undefined)) || Boolean(await typesafeKeyAnywhere($).catch(() => undefined))
+      const hasOpenRouterKey = Boolean(await openrouterKey($, 'openrouter').catch(() => undefined))
       // A plain button with its own handler: a dismiss-role button may be taken by the app before onPress runs.
       const checking = await read($, updateCheck)
       const close = async () => {
@@ -4582,11 +4729,12 @@ Saved to ${out}.md and .json` }
       const sameSet = (a: string, b: string) => a.split(',').filter(Boolean).sort().join() === b.split(',').filter(Boolean).sort().join()
       const dirty = Object.entries(draft).some(([field, value]) =>
         value === undefined ? false
-        : field === 'key' ? Boolean(value.trim())
+        : field === 'key' || field === 'openrouterKey' ? Boolean(value.trim())
         : field === 'hide' ? !sameSet(value, config.hide.join(','))
-        : value !== String(config[field as Exclude<keyof SettingsDraft, 'key' | 'hide'>] ?? ''))
+        : value !== String(config[field as Exclude<keyof SettingsDraft, 'key' | 'openrouterKey' | 'hide'>] ?? ''))
       const hidden = (draft.hide ?? config.hide.join(',')).split(',').filter(Boolean)
-      const judgeName = shown.judge === 'haiku' ? 'Haiku' : hasKey || shown.judge === 'jev' ? 'Haiku + Jev' : 'Haiku'
+      const judgeName = shown.judge === 'haiku' ? 'Haiku' : shown.judge === 'openrouter' ? 'Haiku + OpenRouter' : hasKey || shown.judge === 'jev' ? 'Haiku + Jev' : 'Haiku'
+      const orModel = draft.openrouterModel ?? config.openrouterModel
       const summaries: Record<SettingsCard, string> = {
         effort: `${BIAS_WORDS[shown.bias + 2]} · ${shown.floor} to ${shown.ceiling}${shown.helpers === 'on' ? ' · helpers' : ''}`,
         model: shown.modelAuto === 'on' ? 'Cheaper when it can' : "Always the chat's",
@@ -4825,8 +4973,15 @@ Saved to ${out}.md and .json` }
                   </Box>,
                 ]),
 ] : card === 'judge' ? (bare ? [] : [
-            pick({ key: "settings-judge-pick", value: shown.judge, options: [{ value: 'auto', label: hasKey ? 'Haiku + Jev' : 'Haiku (Jev if added)' }, { value: 'haiku', label: 'Haiku only' }], onSelect: v => set('judge')(v === 'haiku' ? 'haiku' : 'auto') }),
-            ...(shown.judge !== 'haiku'
+            pick({ key: "settings-judge-pick", value: shown.judge === 'jev' ? 'auto' : shown.judge, options: [{ value: 'auto', label: hasKey ? 'Haiku + Jev' : 'Haiku (Jev if added)' }, { value: 'openrouter', label: 'Haiku + OpenRouter' }, { value: 'haiku', label: 'Haiku only' }], onSelect: v => set('judge')(v === 'haiku' || v === 'openrouter' ? v : 'auto') }),
+            ...(shown.judge === 'openrouter'
+              ? [
+                  field('or-key-field', <Input key="settings-or-key" placeholder={hasOpenRouterKey ? 'Key saved. Paste to replace' : 'Paste OpenRouter key'}
+                    value={draft.openrouterKey ?? ''} submitLabel="ok" onInput={set('openrouterKey')} onSubmit={set('openrouterKey')} />, 30),
+                  field('or-model-field', <Input key="settings-or-model" placeholder={OPENROUTER_MODEL}
+                    value={orModel} submitLabel="ok" onInput={set('openrouterModel')} onSubmit={set('openrouterModel')} />, 28),
+                ]
+              : shown.judge !== 'haiku'
               ? [field('key-field', <Input key="settings-key" placeholder={hasKey ? 'Key saved. Paste to replace' : 'Paste TypeSafe key'}
                   value={draft.key ?? ''} submitLabel="ok" onInput={set('key')} onSubmit={set('key')} />, 30)]
               : []),
@@ -4835,7 +4990,7 @@ Saved to ${out}.md and .json` }
                 if (tested?.ok === null) return
                 await update($, judgeTest, () => ({ ok: null, text: '' }))
                 $.ui.invalidate('ui.render')
-                const result = await testJudge($, shown.judge, draft.key ?? '')
+                const result = await testJudge($, shown.judge, (shown.judge === 'openrouter' ? draft.openrouterKey : draft.key) ?? '', orModel)
                 await update($, judgeTest, () => result)
                 $.ui.invalidate('ui.render')
               }} />,
@@ -5083,9 +5238,10 @@ Saved to ${out}.md and .json` }
         </Box>
       )
       if (step === 'pick')
-        return band('Haiku judges. Add Jev too?', 62, [
-          // Haiku first and filled: it needs no key. Jev is the optional faster one; with a key, it is tried first and
-          // Haiku stands in whenever it does not answer. Each mark sits tight against its own button.
+        return band('Haiku judges. Add Jev too?', 84, [
+          // Haiku first and filled: it needs no key. Jev (or a decision model on OpenRouter) is the optional faster one;
+          // with a key, it is tried first and Haiku stands in whenever it does not answer. Each mark sits tight against
+          // its own button; OpenRouter gets no mark.
           <Box key="pick-haiku" flexDirection="row" gap={1} alignItems="center">
             <Svg source={CLAUDE_MARK} alt="Claude" width={16} height={16} />
             <Button key="setup-haiku" variant="primary" label="Just Haiku (no key)" onPress={() => pickJudge($, 'haiku')} />
@@ -5094,6 +5250,7 @@ Saved to ${out}.md and .json` }
             <Svg source={TYPESAFE_MARK} alt="TypeSafe" width={12} height={18} />
             <Button key="setup-jev" variant="secondary" label="Add Jev (needs a key)" onPress={() => pickJudge($, 'jev')} />
           </Box>,
+          <Button key="setup-openrouter" variant="secondary" label="Add OpenRouter (key)" onPress={() => pickJudge($, 'openrouter')} />,
           ...nav(
             <Button key="setup-skip" plain dimColor label="Skip" onPress={async () => {
               await markSetupDone($)
@@ -5110,6 +5267,20 @@ Saved to ${out}.md and .json` }
                 if (!v.trim()) return
                 await update($, setupDraft, d => ({ ...d, key: undefined }))
                 await saveJevKey($, v, false)
+                await goSetup($, 'lean')
+              }} />
+          </Box>,
+          ...nav(<Button key="setup-skip" plain label="Skip" onPress={go('lean')} />),
+        ])
+      if (step === 'openrouter')
+        return band('Key from openrouter.ai/keys:', 52, [
+          <Box key="key-field" width={30} flexShrink={1}>
+            <Input key="setup-or-key" placeholder="OpenRouter key" value={draft.openrouterKey ?? ''} submitLabel="Save"
+              onInput={(v: string) => pick('openrouterKey', v)}
+              onSubmit={async (v: string) => {
+                if (!v.trim()) return
+                await update($, setupDraft, d => ({ ...d, openrouterKey: undefined }))
+                await saveOpenRouterKey($, v, false)
                 await goSetup($, 'lean')
               }} />
           </Box>,

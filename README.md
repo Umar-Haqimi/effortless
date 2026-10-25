@@ -119,7 +119,7 @@ limit passes 80% (with a Save mode that caps effort at Medium), and when your ju
 
 <p align="center"><img src="docs/readme/settings.png" alt="The settings panel: Effort, Judge, Handoff, Customize" width="100%"></p>
 
-## Haiku, and Jev if you add it
+## Haiku, and Jev or OpenRouter if you add one
 
 Haiku 5.5 runs on your own Claude login and needs no key. It always makes the handoff call: from 30% of context, every second message, it reads what the chat was for, the trail of topics, the last reply and how full the context is, and says a fresh chat would suit only for a clear reason. Then the Compact button turns into a lit Handoff with the reason. Want Handoff on the bar all the time? Settings → Handoff → Handoff button → **Always**.
 
@@ -130,16 +130,19 @@ Haiku also picks the effort, unless you add Jev, TypeSafe's faster judge (about 
 | `auto` (default) | Haiku, and Jev too when a [TypeSafe](https://typesafe.ai) key is set in the settings or `TYPESAFE_API_KEY` |
 | `haiku` | Haiku only, a key is never used |
 | `jev` | Haiku and Jev, and the key may also come from `~/.config/jev/.env` |
+| `openrouter` | Haiku and a decision model on [OpenRouter's Decisions API](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request) (`inception/mercury-decide` unless you set **OpenRouter model**, e.g. `typesafe/jev-1.13`). The key comes from the settings, `~/.config/effortless/openrouter.env` or `OPENROUTER_API_KEY` |
 
-A key set with `/plugin configure` is kept in Claude Code's secure storage. A key pasted in the setup guide or the Judge card is written in plain text to `~/.config/jev/.env` (the file the jev skills read), never to a file of this repo. If Jev fails or takes longer than 3 seconds, Haiku judges that prompt and effortless tells you why once per session (out of credits, key rejected, no answer).
+The OpenRouter judge asks the same two typed questions as Jev and is used only when you pick it: an `OPENROUTER_API_KEY` you set for other tools never sends your prompts to OpenRouter by itself. It asks only providers that keep no copy of the prompt (`data_collection: deny`), and gives up after 4 seconds. The Decisions API is in alpha at OpenRouter, so it may change.
+
+A key set with `/plugin configure` is kept in Claude Code's secure storage. A key pasted in the setup guide or the Judge card is written in plain text to `~/.config/jev/.env` (the file the jev skills read), or for OpenRouter to `~/.config/effortless/openrouter.env`, never to a file of this repo. If Jev fails or takes longer than 3 seconds, Haiku judges that prompt and effortless tells you why once per session (out of credits, key rejected, no answer).
 
 Short follow-ups such as "go", "ok" or "yes" keep the effort already picked and ask no judge.
 
 ## Keys and trust
 
 - The default judge needs **no key**: Haiku runs on your own Claude login.
-- A key is only needed to add Jev. Enter it with `/plugin configure`, never on the command line, so it stays out of your shell history: Claude Code then keeps it in its secure storage. A key pasted in the setup guide or the Judge card is saved in plain text to `~/.config/jev/.env` instead, so prefer `/plugin configure` on a shared machine.
-- A key is sent only to TypeSafe, and to nothing else. Use a key with a spending limit if your provider offers one.
+- A key is only needed to add Jev or OpenRouter. Enter it with `/plugin configure`, never on the command line, so it stays out of your shell history: Claude Code then keeps it in its secure storage. A key pasted in the setup guide or the Judge card is saved in plain text to `~/.config/jev/.env` (or `~/.config/effortless/openrouter.env`) instead, so prefer `/plugin configure` on a shared machine.
+- A key is sent only to its own service (TypeSafe or OpenRouter), and to nothing else. Use a key with a spending limit if your provider offers one.
 - Like any Claude Code plugin, this mod runs code on your machine. Its code is in [`hooks/`](hooks/): read it before you install if you do not know the author. The programs it starts are `claude` itself (to update or uninstall the mod when you press those buttons), `git` (to see if a new version is out) and, on Update, a plain file copy of the new version into the folder your open chat runs from.
 
 ## What it saves, measured
